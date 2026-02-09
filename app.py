@@ -240,6 +240,7 @@ def join_game(data):
 
 @socketio.on('add_question')
 def add_question(data):
+    print(f"Received question: {data}")
     q = data.get('question')
     a = data.get('answer')
     hl = data.get('house_lies', [])
@@ -248,7 +249,8 @@ def add_question(data):
     
     new_q = Question(q, a, hl)
     game.questions.append(new_q)
-    emit('question_added', new_q.to_dict())
+    print(f"Question added. Total: {len(game.questions)}")
+    emit('question_added', new_q.to_dict(), broadcast=True)
 
 @socketio.on('start_game')
 def start_game_event():

@@ -90,6 +90,7 @@
             var l2 = document.getElementById('q-lie2').value;
 
             if (q && a) {
+                console.log("Sending add_question event:", { question: q, answer: a });
                 socket.emit('add_question', {
                     question: q,
                     answer: a,
