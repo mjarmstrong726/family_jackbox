@@ -25,6 +25,28 @@
         h1 {
             font-size: 2em;
         }
+
+        /* Avatar Grid */
+        .avatar-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .avatar-option {
+            font-size: 2em;
+            background: #444;
+            border-radius: 5px;
+            cursor: pointer;
+            padding: 10px;
+            border: 2px solid transparent;
+        }
+
+        .avatar-option.selected {
+            background: #2196f3;
+            border-color: #fff;
+        }
     </style>
 </head>
 
@@ -35,8 +57,10 @@
         <!-- LOGIN -->
         <div id="p-login">
             <h1>Join Game</h1>
+            <div id="avatar-selector" class="avatar-grid"></div>
             <input type="text" id="p-name" class="mobile-input" placeholder="Your Name">
             <button onclick="joinGame()" class="mobile-btn">JOIN</button>
+
         </div>
 
         <!-- WAITING GENERIC -->
@@ -65,20 +89,87 @@
     <script>
         var socket = io();
         var myName = "";
+        var myAvatar = "👤";
+        var avatars = ['🐶', '🐱', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔'];
+
+        // Init Avatars
+        var grid = document.getElementById('avatar-selector');
+        avatars.forEach(av => {
+            var el = document.createElement('div');
+            el.className = 'avatar-option';
+            el.innerText = av;
+            el.onclick = function () {
+                document.querySelectorAll('.avatar-option').forEach(d => d.classList.remove('selected'));
+                el.classList.add('selected');
+                myAvatar = av;
+            };
+            grid.appendChild(el);
+        });
+        // Select first by default
+        if (grid.firstChild) grid.firstChild.click();
+
         var myLie = "";
+
 
         function joinGame() {
             var name = document.getElementById('p-name').value;
             if (name) {
                 myName = name;
-                socket.emit('join_game', { name: name });
+                localStorage.setItem('family_username', name);
+                localStorage.setItem('family_avatar', myAvatar);
+                socket.emit('join_game', { name: name, avatar: myAvatar });
             }
         }
 
+
+        socket.on('connect', function () {
+            console.log("Connected to server");
+            var savedName = localStorage.getItem('family_username');
+            var savedAvatar = localStorage.getItem('family_avatar');
+
+            if (savedName) {
+                console.log("Found saved name:", savedName);
+                myName = savedName;
+                document.getElementById('p-name').value = savedName;
+                // Restore avatar selection visually too if possible
+                if (savedAvatar && avatars.includes(savedAvatar)) {
+                    myAvatar = savedAvatar;
+                    // Visual update
+                    document.querySelectorAll('.avatar-option').forEach(el => {
+                        if (el.innerText === savedAvatar) {
+                            el.classList.add('selected');
+                        } else {
+                            el.classList.remove('selected');
+                        }
+                    });
+                }
+
+                socket.emit('join_game', { name: savedName, avatar: myAvatar });
+            }
+        });
+
+
         socket.on('joined_success', function (data) {
             document.getElementById('p-login').style.display = 'none';
-            document.getElementById('p-waiting').style.display = 'block';
+            // If state is provided (reconnection), render it immediately
+            if (data.state) {
+                // We might need "question" or other data that comes in generic state_update.
+                // app.py sends: emit('joined_success', {'name': name, 'state': game.state})
+                // It verifies we are in. Then we likely get a broadcast_state() separately?
+                // app.py does: broadcast_state(); emit('joined_success', ...);
+                // So we should get 'state_update' right before or after this?
+                // Let's just wait for state_update, OR if we want to be sure, we can hide login.
+                document.getElementById('p-waiting').style.display = 'block';
+                if (data.state !== 'LOBBY') {
+                    document.getElementById('wait-msg').innerText = "Rejoining game...";
+                } else {
+                    document.getElementById('wait-msg').innerText = "Waiting for Host to start...";
+                }
+            } else {
+                document.getElementById('p-waiting').style.display = 'block';
+            }
         });
+
 
         socket.on('state_update', function (data) {
             console.log("State:", data);

@@ -6,25 +6,30 @@ from flask_socketio import SocketIO, emit
 import random
 import threading
 import time
+import uuid
 
 app = Flask(__name__, static_folder='static')
+
 app.config['SECRET_KEY'] = 'familytruths_secret'
 socketio = SocketIO(app, async_mode='eventlet')
 
 # --- DATA STRUCTURES ---
 
 class Question:
-    def __init__(self, text, answer, house_lies=None):
+    def __init__(self, text, answer, house_lies=None, qid=None):
+        self.id = qid if qid else str(uuid.uuid4())
         self.text = text
         self.answer = answer
         self.house_lies = house_lies if house_lies else []
 
     def to_dict(self):
         return {
+            'id': self.id,
             'text': self.text,
             'answer': self.answer,
             'house_lies': self.house_lies
         }
+
 
 class GameState:
     LOBBY = 'LOBBY'
@@ -48,12 +53,23 @@ class GameState:
         self.timer_thread = None
         self.time_left = 0
 
-    def add_player(self, sid, name):
-        self.players[sid] = {'name': name, 'score': 0, 'connected': True}
+    def add_player(self, sid, name, avatar='👤'):
+        self.players[sid] = {'name': name, 'score': 0, 'connected': True, 'avatar': avatar}
+
 
     def remove_player(self, sid):
         if sid in self.players:
             self.players[sid]['connected'] = False
+            print(f"Player {self.players[sid]['name']} disconnected (session {sid})")
+            # We don't remove them entirely so they can reconnect
+
+    def reconnect_player(self, old_sid, new_sid):
+        if old_sid in self.players:
+            self.players[new_sid] = self.players.pop(old_sid)
+            self.players[new_sid]['connected'] = True
+            return True
+        return False
+
 
     def next_round(self):
         self.current_question_index += 1
@@ -78,8 +94,13 @@ def broadcast_state():
     
     common_data = {
         'state': game.state,
-        'time_left': game.time_left
+        'time_left': game.time_left,
+        'round_info': {
+            'current': game.current_question_index + 1,
+            'total': len(game.questions)
+        }
     }
+
     
     # HOST DATA
     host_data = common_data.copy()
@@ -223,20 +244,80 @@ def player():
 
 @socketio.on('connect')
 def connect():
+    print(f"Client connected: {request.sid}")
+    # Send initial data useful for reconnection or setup
     emit('connected', {'sid': request.sid})
+    
+    # If host connects (or reloads), they might need deck size
+    emit('deck_status', {'count': len(game.questions)})
+
+@socketio.on('disconnect')
+def disconnect():
+    print(f"Client disconnected: {request.sid}")
+    game.remove_player(request.sid)
+    broadcast_state()
+
+
 
 @socketio.on('host_login')
 def host_login():
      # Host doesn't need to do much
-    emit('state_update', {'state': game.state, 'questions': [q.to_dict() for q in game.questions]})
+    emit('state_update', {
+        'state': game.state, 
+        'questions': [q.to_dict() for q in game.questions],
+        'players': list(game.players.values())
+    })
+    # Also send the question list explicitly
+    emit('question_list_update', {'questions': [q.to_dict() for q in game.questions]})
+
 
 @socketio.on('join_game')
 def join_game(data):
     name = data.get('name')
-    game.add_player(request.sid, name)
+    avatar = data.get('avatar', '👤')
+    
+    # Check for reconnection by name
+    existing_sid = None
+    for sid, p in game.players.items():
+        if p['name'] == name and not p['connected']:
+            existing_sid = sid
+            break
+            
+    if existing_sid:
+        game.reconnect_player(existing_sid, request.sid)
+        # Update avatar if they changed it? Maybe safe to keep old or update.
+        game.players[request.sid]['avatar'] = avatar 
+        print(f"Player {name} reconnected!")
+    else:
+        # Prevent duplicate names if active?
+        # For now, just allow duplicate names or append ID? 
+        # Let's simple check if active name exists
+        for sid, p in game.players.items():
+            if p['name'] == name and p['connected']:
+                emit('error', {'message': "Name already taken!"})
+                return
+
+        game.add_player(request.sid, name, avatar)
+
+
     # Broadcast to host
     broadcast_state()
-    emit('joined_success', {'name': name})
+    # Send success with current state so they jump right in
+    emit('joined_success', {'name': name, 'state': game.state})
+    
+    # If we are in the middle of a game, send them the specific state data they need
+    # (e.g. if in BLUFF_INPUT, they need the question)
+    # The client-side 'state_update' listener handles generic state, 
+    # but we should manually trigger it for this user now.
+    # actually broadcast_state() sends to everyone. 
+    # Let's send a personal state update just to be sure they get specific data 
+    # (broadcast_state sends to 'host' usually? No, it emits 'state_update' to everyone usually?)
+    
+    # Re-read broadcast_state... it emits 'state_update' which everybody hears.
+    # But it customizes 'host_data' which might be confusingly named in the original code.
+    # original code: socketio.emit('state_update', host_data) -> sends SAME data to everyone including players.
+    # So calling broadcast_state() is enough.
+
 
 @socketio.on('add_question')
 def add_question(data):
@@ -250,7 +331,35 @@ def add_question(data):
     new_q = Question(q, a, hl)
     game.questions.append(new_q)
     print(f"Question added. Total: {len(game.questions)}")
+    # Send updated count
+    emit('deck_status', {'count': len(game.questions)}, broadcast=True)
+    # Send full list to host for management
+    emit('question_list_update', {'questions': [q.to_dict() for q in game.questions]}, broadcast=True)
     emit('question_added', new_q.to_dict(), broadcast=True)
+
+@socketio.on('delete_question')
+def delete_question(data):
+    qid = data.get('id')
+    game.questions = [q for q in game.questions if q.id != qid]
+    emit('deck_status', {'count': len(game.questions)}, broadcast=True)
+    emit('question_list_update', {'questions': [q.to_dict() for q in game.questions]}, broadcast=True)
+
+@socketio.on('edit_question')
+def edit_question(data):
+    qid = data.get('id')
+    for q in game.questions:
+        if q.id == qid:
+            q.text = data.get('question', q.text)
+            q.answer = data.get('answer', q.answer)
+            # house lies update if needed
+            hl = data.get('house_lies')
+            if hl:
+                 q.house_lies = [l for l in hl if l.strip()]
+            break
+            
+    emit('question_list_update', {'questions': [q.to_dict() for q in game.questions]}, broadcast=True)
+
+
 
 @socketio.on('start_game')
 def start_game_event():
